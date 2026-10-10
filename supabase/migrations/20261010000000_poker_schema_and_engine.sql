@@ -2,7 +2,20 @@
 -- TEXAS HOLD'EM POKER ENGINE - PRODUCTION SCHEMA & RPC FUNCTIONS
 -- Capacity: 3 to 8 Players (Ring Table)
 -- Security: Server-Authoritative with Row-Level Security Hole Card Protection
+-- Auth: Custom Unique Username + Password Authentication with PGCrypto
 -- ==============================================================================
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- 0. User Accounts & Profiles (Unique Username & Password)
+CREATE TABLE IF NOT EXISTS poker_users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    username VARCHAR(30) UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    chips INT DEFAULT 5000 CHECK (chips >= 0),
+    avatar_url TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
 
 -- 1. Poker Rooms
 CREATE TABLE IF NOT EXISTS poker_rooms (
@@ -28,7 +41,7 @@ CREATE TABLE IF NOT EXISTS poker_rooms (
 CREATE TABLE IF NOT EXISTS poker_room_players (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     room_id UUID REFERENCES poker_rooms(id) ON DELETE CASCADE,
-    user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    user_id UUID REFERENCES poker_users(id) ON DELETE SET NULL,
     username VARCHAR(50) NOT NULL,
     avatar_url TEXT,
     seat_index INT NOT NULL CHECK (seat_index >= 0 AND seat_index < 8),
@@ -65,7 +78,7 @@ CREATE TABLE IF NOT EXISTS poker_hands (
 CREATE TABLE IF NOT EXISTS poker_player_cards (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     hand_id UUID REFERENCES poker_hands(id) ON DELETE CASCADE,
-    user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+    user_id UUID,
     seat_index INT NOT NULL CHECK (seat_index >= 0 AND seat_index < 8),
     cards JSONB NOT NULL,                      -- e.g. ["Qh", "Jc"]
     shown BOOLEAN DEFAULT FALSE,
@@ -74,37 +87,40 @@ CREATE TABLE IF NOT EXISTS poker_player_cards (
 );
 
 -- Realtime Publication for Table Sync
+ALTER PUBLICATION supabase_realtime ADD TABLE poker_users;
 ALTER PUBLICATION supabase_realtime ADD TABLE poker_rooms;
 ALTER PUBLICATION supabase_realtime ADD TABLE poker_room_players;
 ALTER PUBLICATION supabase_realtime ADD TABLE poker_hands;
 ALTER PUBLICATION supabase_realtime ADD TABLE poker_player_cards;
 
 -- Enable Row Level Security (RLS)
+ALTER TABLE poker_users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE poker_rooms ENABLE ROW LEVEL SECURITY;
 ALTER TABLE poker_room_players ENABLE ROW LEVEL SECURITY;
 ALTER TABLE poker_hands ENABLE ROW LEVEL SECURITY;
 ALTER TABLE poker_player_cards ENABLE ROW LEVEL SECURITY;
 
--- RLS Policies for poker_rooms
+-- RLS Policies
+CREATE POLICY "Public read poker users" ON poker_users FOR SELECT USING (true);
+CREATE POLICY "Public insert poker users" ON poker_users FOR INSERT WITH CHECK (true);
+CREATE POLICY "Public update poker users" ON poker_users FOR UPDATE USING (true);
+
 CREATE POLICY "Public read poker rooms" ON poker_rooms FOR SELECT USING (true);
 CREATE POLICY "Public insert poker rooms" ON poker_rooms FOR INSERT WITH CHECK (true);
 CREATE POLICY "Public update poker rooms" ON poker_rooms FOR UPDATE USING (true);
 
--- RLS Policies for poker_room_players
 CREATE POLICY "Public read room players" ON poker_room_players FOR SELECT USING (true);
 CREATE POLICY "Public insert room players" ON poker_room_players FOR INSERT WITH CHECK (true);
 CREATE POLICY "Public update room players" ON poker_room_players FOR UPDATE USING (true);
 CREATE POLICY "Public delete room players" ON poker_room_players FOR DELETE USING (true);
 
--- RLS Policies for poker_hands
 CREATE POLICY "Public read poker hands" ON poker_hands FOR SELECT USING (true);
 CREATE POLICY "Public insert poker hands" ON poker_hands FOR INSERT WITH CHECK (true);
 CREATE POLICY "Public update poker hands" ON poker_hands FOR UPDATE USING (true);
 
--- Strict Hole Card Privacy Policy
 CREATE POLICY "Strict Hole Card Privacy" ON poker_player_cards
 FOR SELECT USING (
-    (auth.uid() IS NOT NULL AND auth.uid() = user_id)
+    (user_id IS NOT NULL AND auth.uid() = user_id)
     OR
     (SELECT phase FROM poker_hands WHERE id = poker_player_cards.hand_id) IN ('showdown', 'ended')
     OR
@@ -115,6 +131,117 @@ CREATE POLICY "Insert player cards" ON poker_player_cards FOR INSERT WITH CHECK 
 CREATE POLICY "Update player cards" ON poker_player_cards FOR UPDATE USING (true);
 
 -- ==============================================================================
+-- AUTHENTICATION RPC FUNCTIONS
+-- ==============================================================================
+
+-- 1. Register User (Unique Username, Password Hash)
+CREATE OR REPLACE FUNCTION register_poker_user(
+    p_username TEXT,
+    p_password TEXT
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_clean_username TEXT;
+    v_user RECORD;
+BEGIN
+    v_clean_username := trim(p_username);
+    IF length(v_clean_username) < 3 THEN
+        RAISE EXCEPTION 'Username must be at least 3 characters long.';
+    END IF;
+    IF length(p_password) < 4 THEN
+        RAISE EXCEPTION 'Password must be at least 4 characters long.';
+    END IF;
+
+    -- Case-insensitive uniqueness check
+    IF EXISTS (SELECT 1 FROM poker_users WHERE lower(username) = lower(v_clean_username)) THEN
+        RAISE EXCEPTION 'Username "%" is already taken. Please choose another username.', v_clean_username;
+    END IF;
+
+    INSERT INTO poker_users (
+        username,
+        password_hash,
+        chips
+    ) VALUES (
+        v_clean_username,
+        crypt(p_password, gen_salt('bf')),
+        5000
+    ) RETURNING id, username, chips, avatar_url, created_at INTO v_user;
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'user', jsonb_build_object(
+            'id', v_user.id,
+            'username', v_user.username,
+            'chips', v_user.chips,
+            'avatar_url', v_user.avatar_url,
+            'created_at', v_user.created_at
+        )
+    );
+END;
+$$ LANGUAGE plpgsql;
+
+-- 2. Login User
+CREATE OR REPLACE FUNCTION login_poker_user(
+    p_username TEXT,
+    p_password TEXT
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_clean_username TEXT;
+    v_user RECORD;
+BEGIN
+    v_clean_username := trim(p_username);
+    SELECT * INTO v_user 
+    FROM poker_users 
+    WHERE lower(username) = lower(v_clean_username);
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Account with username "%" not found. Please register first.', v_clean_username;
+    END IF;
+
+    IF v_user.password_hash != crypt(p_password, v_user.password_hash) THEN
+        RAISE EXCEPTION 'Incorrect password. Please verify and try again.';
+    END IF;
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'user', jsonb_build_object(
+            'id', v_user.id,
+            'username', v_user.username,
+            'chips', v_user.chips,
+            'avatar_url', v_user.avatar_url,
+            'created_at', v_user.created_at
+        )
+    );
+END;
+$$ LANGUAGE plpgsql;
+
+-- 3. Get Active Rooms List
+CREATE OR REPLACE FUNCTION get_active_poker_rooms()
+RETURNS JSONB AS $$
+DECLARE
+    v_result JSONB;
+BEGIN
+    SELECT coalesce(jsonb_agg(
+        jsonb_build_object(
+            'id', r.id,
+            'code', r.code,
+            'name', r.name,
+            'max_players', r.max_players,
+            'player_count', (SELECT count(*) FROM poker_room_players p WHERE p.room_id = r.id),
+            'small_blind', r.small_blind,
+            'big_blind', r.big_blind,
+            'status', r.status,
+            'created_at', r.created_at
+        ) ORDER BY r.created_at DESC
+    ), '[]'::jsonb) INTO v_result
+    FROM poker_rooms r;
+
+    RETURN v_result;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ==============================================================================
 -- POKER UTILITY & ENGINE FUNCTIONS
 -- ==============================================================================
 
@@ -122,7 +249,7 @@ CREATE POLICY "Update player cards" ON poker_player_cards FOR UPDATE USING (true
 CREATE OR REPLACE FUNCTION generate_shuffled_deck()
 RETURNS JSONB AS $$
 DECLARE
-    suits TEXT[] := ARRAY['s', 'h', 'd', 'c']; -- spades, hearts, diamonds, clubs
+    suits TEXT[] := ARRAY['s', 'h', 'd', 'c'];
     ranks TEXT[] := ARRAY['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A'];
     deck TEXT[] := ARRAY[]::TEXT[];
     s TEXT;
@@ -185,10 +312,11 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql STABLE;
 
--- Create or join a room
+-- Create Room Function
 CREATE OR REPLACE FUNCTION create_poker_room(
     p_name TEXT,
     p_code TEXT,
+    p_max_players INT DEFAULT 6,
     p_starting_stack INT DEFAULT 1500,
     p_small_blind INT DEFAULT 10,
     p_big_blind INT DEFAULT 20,
@@ -201,6 +329,7 @@ BEGIN
     INSERT INTO poker_rooms (
         name,
         code,
+        max_players,
         starting_stack,
         small_blind,
         big_blind,
@@ -209,6 +338,7 @@ BEGIN
     ) VALUES (
         p_name,
         p_code,
+        p_max_players,
         p_starting_stack,
         p_small_blind,
         p_big_blind,
@@ -241,28 +371,24 @@ DECLARE
     v_deck_array TEXT[];
     v_deck_pos INT := 1;
 BEGIN
-    -- 1. Lock room
     SELECT * INTO v_room FROM poker_rooms WHERE id = p_room_id FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Room not found';
     END IF;
 
-    -- Count eligible players with chips > 0
     SELECT COUNT(*) INTO v_active_players_count 
     FROM poker_room_players 
     WHERE room_id = p_room_id AND chips > 0 AND status != 'sitting_out';
 
-    IF v_active_players_count < 3 THEN
-        RAISE EXCEPTION 'At least 3 players required to start hand (found %)', v_active_players_count;
+    IF v_active_players_count < 2 THEN
+        RAISE EXCEPTION 'At least 2 players with chips required to start hand (found %)', v_active_players_count;
     END IF;
 
-    -- 2. Move Dealer Button clockwise
     v_dealer_seat := get_next_active_seat(p_room_id, v_room.dealer_seat, FALSE);
     IF v_dealer_seat = -1 THEN
         v_dealer_seat := v_room.dealer_seat;
     END IF;
 
-    -- Reset round bets and set active players
     UPDATE poker_room_players
     SET current_round_bet = 0,
         total_hand_bet = 0,
@@ -270,21 +396,13 @@ BEGIN
         last_action = NULL
     WHERE room_id = p_room_id;
 
-    -- 3. Blinds rotation (Uniform 3-8 Players)
     v_sb_seat := get_next_active_seat(p_room_id, v_dealer_seat, TRUE);
     v_bb_seat := get_next_active_seat(p_room_id, v_sb_seat, TRUE);
     v_utg_seat := get_next_active_seat(p_room_id, v_bb_seat, TRUE);
 
-    -- Check blind increase mode
     v_hand_number := v_room.hand_count + 1;
     v_sb_amount := v_room.small_blind;
     v_bb_amount := v_room.big_blind;
-
-    IF v_room.blind_increase_mode = 'hands' AND v_hand_number > 1 AND (v_hand_number % v_room.blind_increase_interval = 0) THEN
-        v_sb_amount := v_sb_amount * 2;
-        v_bb_amount := v_bb_amount * 2;
-        UPDATE poker_rooms SET small_blind = v_sb_amount, big_blind = v_bb_amount, blind_level = blind_level + 1 WHERE id = p_room_id;
-    END IF;
 
     -- Deduct Small Blind
     UPDATE poker_room_players
@@ -302,11 +420,9 @@ BEGIN
         last_action = 'big_blind'
     WHERE room_id = p_room_id AND seat_index = v_bb_seat;
 
-    -- 4. Generate Shuffled Deck
     v_deck := generate_shuffled_deck();
     SELECT ARRAY(SELECT jsonb_array_elements_text(v_deck)) INTO v_deck_array;
 
-    -- 5. Create Hand Record
     INSERT INTO poker_hands (
         room_id,
         hand_number,
@@ -333,7 +449,6 @@ BEGIN
         NOW() + (v_room.turn_time_seconds || ' seconds')::INTERVAL
     ) RETURNING id INTO v_hand_id;
 
-    -- 6. Deal 2 hole cards to each active player
     FOR p IN SELECT * FROM poker_room_players WHERE room_id = p_room_id AND status = 'active' ORDER BY seat_index LOOP
         v_card1 := v_deck_array[v_deck_pos];
         v_card2 := v_deck_array[v_deck_pos + 1];
@@ -354,12 +469,10 @@ BEGIN
         );
     END LOOP;
 
-    -- Update remaining deck on hand
     UPDATE poker_hands 
     SET deck = to_jsonb(v_deck_array[v_deck_pos:])
     WHERE id = v_hand_id;
 
-    -- Update room status
     UPDATE poker_rooms
     SET status = 'in_progress',
         dealer_seat = v_dealer_seat,
@@ -378,7 +491,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Submit Player Action (Fold, Check, Call, Bet, Raise)
+-- Submit Player Action
 CREATE OR REPLACE FUNCTION submit_poker_action(
     p_room_id UUID,
     p_seat_index INT,
@@ -401,7 +514,6 @@ DECLARE
     v_burn TEXT;
     v_new_cards TEXT[];
 BEGIN
-    -- 1. Lock room & current active hand
     SELECT * INTO v_room FROM poker_rooms WHERE id = p_room_id FOR UPDATE;
     SELECT * INTO v_hand FROM poker_hands WHERE room_id = p_room_id AND phase NOT IN ('ended') ORDER BY created_at DESC LIMIT 1 FOR UPDATE;
     
@@ -418,7 +530,6 @@ BEGIN
         RAISE EXCEPTION 'Player not found or not active';
     END IF;
 
-    -- 2. Execute Action
     IF p_action = 'fold' THEN
         UPDATE poker_room_players 
         SET status = 'folded', last_action = 'fold' 
@@ -469,13 +580,12 @@ BEGIN
         RAISE EXCEPTION 'Invalid action: %', p_action;
     END IF;
 
-    -- 3. Check for uncontested winner (all other active players folded)
+    -- Check for uncontested winner
     SELECT COUNT(*) INTO v_active_count 
     FROM poker_room_players 
     WHERE room_id = p_room_id AND status IN ('active', 'all_in');
 
     IF v_active_count = 1 THEN
-        -- Only 1 player remains! Award pot to that player
         DECLARE
             v_winner RECORD;
         BEGIN
@@ -495,7 +605,7 @@ BEGIN
         END;
     END IF;
 
-    -- 4. Check if current betting round is complete
+    -- Check if current betting round is complete
     SELECT COUNT(*) INTO v_remaining_bettors
     FROM poker_room_players
     WHERE room_id = p_room_id 
@@ -503,15 +613,12 @@ BEGIN
       AND (current_round_bet < v_hand.current_bet OR last_action IS NULL);
 
     IF v_remaining_bettors = 0 THEN
-        -- Advance Street / Phase (preflop -> flop -> turn -> river -> showdown)
         SELECT ARRAY(SELECT jsonb_array_elements_text(v_hand.deck)) INTO v_deck_array;
         SELECT ARRAY(SELECT jsonb_array_elements_text(v_hand.community_cards)) INTO v_community;
 
-        -- Reset round bets for next street
         UPDATE poker_room_players SET current_round_bet = 0, last_action = NULL WHERE room_id = p_room_id;
 
         IF v_hand.phase = 'preflop' THEN
-            -- Burn 1, Deal Flop (3 cards)
             v_next_phase := 'flop';
             v_burn := v_deck_array[1];
             v_new_cards := ARRAY[v_deck_array[2], v_deck_array[3], v_deck_array[4]];
@@ -519,7 +626,6 @@ BEGIN
             v_community := array_cat(v_community, v_new_cards);
 
         ELSIF v_hand.phase = 'flop' THEN
-            -- Burn 1, Deal Turn (1 card)
             v_next_phase := 'turn';
             v_burn := v_deck_array[1];
             v_new_cards := ARRAY[v_deck_array[2]];
@@ -527,7 +633,6 @@ BEGIN
             v_community := array_cat(v_community, v_new_cards);
 
         ELSIF v_hand.phase = 'turn' THEN
-            -- Burn 1, Deal River (1 card)
             v_next_phase := 'river';
             v_burn := v_deck_array[1];
             v_new_cards := ARRAY[v_deck_array[2]];
@@ -545,7 +650,6 @@ BEGIN
             
             RETURN jsonb_build_object('success', true, 'phase', 'showdown');
         ELSE
-            -- Next betting round begins with first active player to the left of the Dealer
             v_next_seat := get_next_active_seat(p_room_id, v_room.dealer_seat, TRUE);
             UPDATE poker_hands
             SET phase = v_next_phase,
@@ -561,7 +665,6 @@ BEGIN
             RETURN jsonb_build_object('success', true, 'phase', v_next_phase, 'current_turn_seat', v_next_seat);
         END IF;
     ELSE
-        -- Next player to act in current round
         v_next_seat := get_next_active_seat(p_room_id, p_seat_index, TRUE);
         UPDATE poker_hands
         SET current_turn_seat = v_next_seat,
@@ -573,7 +676,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Handle Turn Timeout (Auto-Check or Auto-Fold)
+-- Handle Turn Timeout
 CREATE OR REPLACE FUNCTION handle_turn_timeout(p_room_id UUID)
 RETURNS JSONB AS $$
 DECLARE
