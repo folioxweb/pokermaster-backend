@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'supabase/**'
   workflow_dispatch:
 
 jobs:
@@ -34,7 +32,7 @@ jobs:
             supabase db push --password "$SUPABASE_DB_PASSWORD" --include-all --yes --debug
             echo "Successfully applied database migrations to Supabase."
           else
-            echo "Secrets SUPABASE_ACCESS_TOKEN and/or SUPABASE_DB_PASSWORD are not set."
+            echo "Secrets SUPABASE_ACCESS_TOKEN and/or SUPABASE_DB_PASSWORD are not set in GitHub repository secrets."
             exit 1
           fi
 
