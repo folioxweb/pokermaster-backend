@@ -27,11 +27,15 @@ jobs:
           SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID || 'hesjadnveduthwxstvdf' }}
         run: |
           if [ -n "$SUPABASE_ACCESS_TOKEN" ] && [ -n "$SUPABASE_DB_PASSWORD" ]; then
-            supabase link --project-ref "$SUPABASE_PROJECT_ID" --password "$SUPABASE_DB_PASSWORD"
-            supabase db push --password "$SUPABASE_DB_PASSWORD"
+            echo "Linking Supabase Project $SUPABASE_PROJECT_ID..."
+            supabase link --project-ref "$SUPABASE_PROJECT_ID" --password "$SUPABASE_DB_PASSWORD" --debug
+            
+            echo "Pushing database migrations..."
+            supabase db push --password "$SUPABASE_DB_PASSWORD" --include-all --yes --debug
             echo "Successfully applied database migrations to Supabase."
           else
-            echo "Secrets SUPABASE_ACCESS_TOKEN and SUPABASE_DB_PASSWORD not yet set. Skipping automated db push."
+            echo "Secrets SUPABASE_ACCESS_TOKEN and/or SUPABASE_DB_PASSWORD are not set."
+            exit 1
           fi
 
       - name: Deploy Supabase Edge Functions
@@ -40,8 +44,10 @@ jobs:
           SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID || 'hesjadnveduthwxstvdf' }}
         run: |
           if [ -n "$SUPABASE_ACCESS_TOKEN" ]; then
-            supabase functions deploy --project-ref "$SUPABASE_PROJECT_ID"
+            echo "Deploying Edge Functions..."
+            supabase functions deploy --project-ref "$SUPABASE_PROJECT_ID" --no-verify-jwt
             echo "Successfully deployed Edge Functions to Supabase."
           else
-            echo "Secret SUPABASE_ACCESS_TOKEN not yet set. Skipping functions deploy."
+            echo "Secret SUPABASE_ACCESS_TOKEN not set."
+            exit 1
           fi
