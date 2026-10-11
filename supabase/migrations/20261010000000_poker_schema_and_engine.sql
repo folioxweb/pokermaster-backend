@@ -108,6 +108,7 @@ CREATE POLICY "Public update poker users" ON poker_users FOR UPDATE USING (true)
 CREATE POLICY "Public read poker rooms" ON poker_rooms FOR SELECT USING (true);
 CREATE POLICY "Public insert poker rooms" ON poker_rooms FOR INSERT WITH CHECK (true);
 CREATE POLICY "Public update poker rooms" ON poker_rooms FOR UPDATE USING (true);
+CREATE POLICY "Public delete poker rooms" ON poker_rooms FOR DELETE USING (true);
 
 CREATE POLICY "Public read room players" ON poker_room_players FOR SELECT USING (true);
 CREATE POLICY "Public insert room players" ON poker_room_players FOR INSERT WITH CHECK (true);
@@ -235,7 +236,8 @@ BEGIN
             'created_at', r.created_at
         ) ORDER BY r.created_at DESC
     ), '[]'::jsonb) INTO v_result
-    FROM poker_rooms r;
+    FROM poker_rooms r
+    WHERE r.status != 'closed' AND r.status != 'ended';
 
     RETURN v_result;
 END;
