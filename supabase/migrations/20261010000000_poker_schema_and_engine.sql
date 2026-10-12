@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS poker_rooms (
     status VARCHAR(20) DEFAULT 'waiting',            -- 'waiting' | 'in_progress' | 'completed'
     dealer_seat INT DEFAULT 0,
     hand_count INT DEFAULT 0,
+    host_username VARCHAR(50) DEFAULT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -236,6 +237,7 @@ BEGIN
             'small_blind', r.small_blind,
             'big_blind', r.big_blind,
             'status', r.status,
+            'host_username', r.host_username,
             'created_at', r.created_at
         ) ORDER BY r.created_at DESC
     ), '[]'::jsonb) INTO v_result
@@ -325,7 +327,8 @@ CREATE OR REPLACE FUNCTION create_poker_room(
     p_starting_stack INT DEFAULT 1500,
     p_small_blind INT DEFAULT 10,
     p_big_blind INT DEFAULT 20,
-    p_turn_time INT DEFAULT 25
+    p_turn_time INT DEFAULT 25,
+    p_host_username TEXT DEFAULT NULL
 )
 RETURNS UUID AS $$
 DECLARE
@@ -339,7 +342,8 @@ BEGIN
         small_blind,
         big_blind,
         turn_time_seconds,
-        status
+        status,
+        host_username
     ) VALUES (
         p_name,
         p_code,
@@ -348,7 +352,8 @@ BEGIN
         p_small_blind,
         p_big_blind,
         p_turn_time,
-        'waiting'
+        'waiting',
+        p_host_username
     ) RETURNING id INTO v_room_id;
 
     RETURN v_room_id;
