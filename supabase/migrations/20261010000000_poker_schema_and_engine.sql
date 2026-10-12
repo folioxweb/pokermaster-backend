@@ -119,6 +119,9 @@ CREATE POLICY "Public read poker hands" ON poker_hands FOR SELECT USING (true);
 CREATE POLICY "Public insert poker hands" ON poker_hands FOR INSERT WITH CHECK (true);
 CREATE POLICY "Public update poker hands" ON poker_hands FOR UPDATE USING (true);
 
+-- Zero-knowledge database hardening: Revoke direct read access to undealt deck column
+REVOKE SELECT (deck) ON poker_hands FROM anon, authenticated;
+
 CREATE POLICY "Strict Hole Card Privacy" ON poker_player_cards
 FOR SELECT USING (
     (user_id IS NOT NULL AND auth.uid() = user_id)
