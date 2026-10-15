@@ -10,9 +10,9 @@ CREATE OR REPLACE FUNCTION create_poker_room(
     p_name TEXT,
     p_code TEXT,
     p_max_players INT DEFAULT 6,
-    p_starting_stack INT DEFAULT 1500,
-    p_small_blind INT DEFAULT 10,
-    p_big_blind INT DEFAULT 20,
+    p_starting_stack INT DEFAULT 1000,
+    p_small_blind INT DEFAULT 2,
+    p_big_blind INT DEFAULT 4,
     p_turn_time INT DEFAULT 25,
     p_host_username TEXT DEFAULT NULL
 )
